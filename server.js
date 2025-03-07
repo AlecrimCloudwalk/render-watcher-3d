@@ -73,15 +73,28 @@ function initializeWatcher(dir) {
     // Set the current watch directory
     currentWatchDir = dir;
     
-    // Reset frame detection times when changing directories
+    // Reset frame detection times and counts when changing directories
     lastFrameDetectionTime = 0;
     previousFrameDetectionTime = 0;
+    firstFrameDetectionTime = 0;
+    completedFrames = 0; // Reset completed frames count
+    frameTimes = []; // Reset frame times array
     
     // Get the creation time of the first frame file if it exists
     firstFrameDetectionTime = getFirstFrameCreationTime();
     
+    // Close existing watcher if any
+    if (watcher) {
+        try {
+            watcher.close();
+            console.log(`${colors.green}[INFO]${colors.reset} Closed previous watcher`);
+        } catch (err) {
+            console.error(`${colors.red}[ERROR]${colors.reset} Error closing previous watcher: ${err.message}`);
+        }
+    }
+    
     // Initialize the watcher
-    const watcher = chokidar.watch(dir, {
+    watcher = chokidar.watch(dir, {
         ignored: /(^|[\/\\])\../, // Ignore dot files
         persistent: true,
         ignoreInitial: false, // Process existing files
@@ -152,6 +165,21 @@ function initializeWatcher(dir) {
         const isFrameFile = /\.(png|jpg|jpeg|tif|tiff|exr|hdr|dpx)$/i.test(ext);
         
         if (isFrameFile) {
+            // Check if the file has a valid frame number
+            const filename = path.basename(filePath);
+            const match = filename.match(/\d+/);
+            
+            if (!match) {
+                console.log(`${colors.yellow}[WARN]${colors.reset} Ignoring file without frame number: ${filename}`);
+                return;
+            }
+            
+            const frameNumber = parseInt(match[0], 10);
+            if (isNaN(frameNumber)) {
+                console.log(`${colors.yellow}[WARN]${colors.reset} Ignoring file with invalid frame number: ${filename}`);
+                return;
+            }
+            
             // Get the file creation time
             const stats = fs.statSync(filePath);
             const fileCreationTime = stats.birthtimeMs || stats.mtimeMs; // Use modification time as fallback
@@ -174,10 +202,10 @@ function initializeWatcher(dir) {
                 console.log(`${colors.cyan}[TIME]${colors.reset} Time since last frame: ${lastFrameTime.toFixed(1)}s`);
             }
             
-            // Increment completed frames
-            completedFrames++;
+            // Update completed frames count using the getCompletedFrames function
+            completedFrames = getCompletedFrames();
             
-            console.log(`${colors.green}[FRAME]${colors.reset} New frame detected: ${path.basename(filePath)}`);
+            console.log(`${colors.green}[FRAME]${colors.reset} New frame detected: ${path.basename(filePath)} (Frame #${frameNumber})`);
             console.log(`${colors.green}[PROGRESS]${colors.reset} Completed frames: ${completedFrames}/${manualTotalFrames || totalFrames}`);
             
             // Update frame times based on all available frame files
@@ -196,25 +224,63 @@ function initializeWatcher(dir) {
     return watcher;
 }
 
-// API endpoint to set directory
+// API endpoint to reset frame count
+app.post('/api/reset-frames', (req, res) => {
+    try {
+        console.log(`${colors.green}[RESET]${colors.reset} Resetting frame count`);
+        
+        // Reset frame count and related variables
+        completedFrames = 0;
+        lastFrameTime = 0;
+        lastFrameDetectionTime = 0;
+        previousFrameDetectionTime = 0;
+        firstFrameDetectionTime = 0;
+        frameTimes = [];
+        
+        // Re-count frames in the current directory
+        completedFrames = getCompletedFrames();
+        
+        console.log(`${colors.green}[RESET]${colors.reset} Frame count reset. Current count: ${completedFrames}`);
+        
+        // Broadcast updated progress
+        broadcastProgress();
+        
+        res.json({ success: true, completedFrames });
+    } catch (error) {
+        console.error(`${colors.red}[ERROR]${colors.reset} Failed to reset frame count: ${error.message}`);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// API endpoint to change watch directory
 app.post('/api/set-directory', (req, res) => {
     const { directory } = req.body;
     
     if (!directory) {
-        return res.status(400).json({ success: false, error: 'No directory specified' });
+        return res.status(400).json({ success: false, error: 'No directory provided' });
     }
     
     try {
-        // Initialize watcher with new directory
-        const success = initializeWatcher(directory);
+        // Reset frame count and related variables before changing directory
+        completedFrames = 0;
+        lastFrameTime = 0;
+        lastFrameDetectionTime = 0;
+        previousFrameDetectionTime = 0;
+        firstFrameDetectionTime = 0;
+        frameTimes = [];
         
-        if (success) {
-            res.json({ success: true, directory });
-        } else {
-            res.status(500).json({ success: false, error: 'Failed to initialize watcher' });
-        }
+        // Initialize watcher for the new directory
+        watcher = initializeWatcher(directory);
+        
+        // Save to recent directories
+        saveToRecentDirectories(directory);
+        
+        // Update directory path display
+        updateDirectoryPath(directory);
+        
+        res.json({ success: true, directory });
     } catch (error) {
-        console.error(`${colors.red}[ERROR]${colors.reset} ${error.message}`);
+        console.error(`${colors.red}[ERROR]${colors.reset} Failed to set directory: ${error.message}`);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -307,10 +373,34 @@ app.post('/api/set-total-frames', (req, res) => {
 function getCompletedFrames() {
     try {
         const files = fs.readdirSync(currentWatchDir);
+        
+        // Filter for frame files with valid extensions
         const frameFiles = files.filter(file => {
             return /\.(png|jpg|jpeg|tif|tiff|exr|hdr|dpx)$/i.test(file);
         });
-        return frameFiles.length;
+        
+        // Extract frame numbers and validate sequence
+        const frameNumbers = [];
+        const validFrameFiles = frameFiles.filter(file => {
+            // Extract frame number from filename
+            const match = file.match(/\d+/);
+            if (match) {
+                const frameNumber = parseInt(match[0], 10);
+                if (!isNaN(frameNumber)) {
+                    frameNumbers.push(frameNumber);
+                    return true;
+                }
+            }
+            console.log(`${colors.yellow}[WARN]${colors.reset} File doesn't appear to be part of a sequence: ${file}`);
+            return false;
+        });
+        
+        // Update the global completedFrames variable
+        completedFrames = validFrameFiles.length;
+        
+        console.log(`${colors.cyan}[FRAMES]${colors.reset} Valid frame files: ${validFrameFiles.length}/${frameFiles.length}`);
+        
+        return validFrameFiles.length;
     } catch (err) {
         console.error(`${colors.red}[ERROR]${colors.reset} Failed to count completed frames: ${err.message}`);
         return completedFrames; // Return the last known value
@@ -494,10 +584,19 @@ function getRecentFrameFiles() {
             };
         });
         
-        // Sort by creation time (newest first)
-        frameFilesWithTimes.sort((a, b) => b.creationTime - a.creationTime);
+        // Filter out files that don't have a valid frame number
+        const validFrameFiles = frameFilesWithTimes.filter(frame => {
+            if (frame.frameNumber === null || isNaN(frame.frameNumber)) {
+                console.log(`${colors.yellow}[WARN]${colors.reset} Ignoring file without valid frame number: ${frame.file}`);
+                return false;
+            }
+            return true;
+        });
         
-        return frameFilesWithTimes;
+        // Sort by creation time (newest first)
+        validFrameFiles.sort((a, b) => b.creationTime - a.creationTime);
+        
+        return validFrameFiles;
     } catch (error) {
         console.error(`${colors.red}[ERROR]${colors.reset} Error getting recent frame files:`, error);
         return [];
@@ -571,7 +670,7 @@ const server = app.listen(port, () => {
     initializeWatcher(currentWatchDir);
 });
 
-// Set up WebSocket server
+// Function to setup WebSocket server
 function setupWebSocketServer(server) {
     wss = new WebSocket.Server({ server });
     
@@ -604,6 +703,25 @@ function setupWebSocketServer(server) {
                     // Send the current state to the requesting client
                     console.log(`${colors.green}[WEBSOCKET]${colors.reset} State requested, sending current state`);
                     sendInitialState(ws);
+                } else if (data.type === 'resetFrames') {
+                    // Reset frame count
+                    console.log(`${colors.green}[WEBSOCKET]${colors.reset} Resetting frame count`);
+                    
+                    // Reset frame count and related variables
+                    completedFrames = 0;
+                    lastFrameTime = 0;
+                    lastFrameDetectionTime = 0;
+                    previousFrameDetectionTime = 0;
+                    firstFrameDetectionTime = 0;
+                    frameTimes = [];
+                    
+                    // Re-count frames in the current directory
+                    completedFrames = getCompletedFrames();
+                    
+                    console.log(`${colors.green}[WEBSOCKET]${colors.reset} Frame count reset. Current count: ${completedFrames}`);
+                    
+                    // Broadcast updated progress
+                    broadcastProgress();
                 }
             } catch (error) {
                 console.error(`${colors.red}[WEBSOCKET]${colors.reset} Error parsing message:`, error);
