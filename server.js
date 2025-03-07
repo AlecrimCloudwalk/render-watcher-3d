@@ -55,7 +55,7 @@ let wss = null; // Global WebSocket server reference
 // Track frame times for statistics
 let frameTimes = [];
 const maxFrameTimesToKeep = 20;
-let lastFrameTime = 30; // Default frame time in seconds
+let lastFrameTime = 0; // Initialize with 0 instead of hardcoded 30 seconds
 let lastFrameDetectionTime = 0;
 let previousFrameDetectionTime = 0;
 let firstFrameDetectionTime = 0;
@@ -324,7 +324,16 @@ function getTotalFrames() {
 
 // Format time in hours, minutes, seconds
 function formatTime(seconds) {
-    if (isNaN(seconds) || seconds < 0) return 'N/A';
+    if (seconds === undefined || seconds === null || seconds === Infinity || isNaN(seconds)) {
+        return 'N/A';
+    }
+    
+    // Ensure seconds is a number
+    seconds = Number(seconds);
+    
+    if (seconds < 0) {
+        return 'N/A';
+    }
     
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
@@ -343,54 +352,38 @@ function broadcastProgress() {
     const effectiveTotalFrames = manualTotalFrames || totalFrames;
     const percentage = (completedFrames / effectiveTotalFrames) * 100;
     
-    // Calculate time elapsed since first frame
+    // Server-side calculations for logging only
     const timeElapsed = firstFrameDetectionTime ? (Date.now() - firstFrameDetectionTime) / 1000 : 0;
-    
-    // Calculate ETA based on average frame time
-    let eta = 0;
-    if (firstFrameDetectionTime) {
-        const now = Date.now();
-        const elapsedMs = now - firstFrameDetectionTime;
-        const avgMsPerFrame = completedFrames > 0 ? elapsedMs / completedFrames : 0;
-        eta = avgMsPerFrame * (effectiveTotalFrames - completedFrames) / 1000;
-    }
-    
-    // Debug info
-    const debugInfo = {
-        firstFrameTime: new Date(firstFrameDetectionTime).toISOString(),
-        lastFrameTime: new Date(lastFrameDetectionTime).toISOString(),
-        previousFrameTime: new Date(previousFrameDetectionTime).toISOString(),
-    };
-    
-    // Calculate last frame time (time between the last two frames)
-    const lastFrameTime = lastFrameDetectionTime && previousFrameDetectionTime 
-        ? (lastFrameDetectionTime - previousFrameDetectionTime) / 1000 
-        : 0;
-    
-    // Calculate average frame time
-    const avgFrameTime = completedFrames > 1 && firstFrameDetectionTime
+    const timeSinceLastFrame = lastFrameDetectionTime ? (Date.now() - lastFrameDetectionTime) / 1000 : 0;
+    const calculatedAvgFrameTime = completedFrames > 1 && firstFrameDetectionTime
         ? (lastFrameDetectionTime - firstFrameDetectionTime) / 1000 / (completedFrames - 1)
         : lastFrameTime || 0;
     
+    // Calculate ETA for logging only
+    let eta = null;
+    if (calculatedAvgFrameTime > 0 && completedFrames < effectiveTotalFrames) {
+        eta = calculatedAvgFrameTime * (effectiveTotalFrames - completedFrames);
+        console.log(`${colors.cyan}[ETA]${colors.reset} Calculated: ${formatTime(eta)} (based on avg: ${calculatedAvgFrameTime.toFixed(1)}s)`);
+    } else {
+        console.log(`${colors.cyan}[ETA]${colors.reset} N/A - rendering complete or no frame time data`);
+    }
+    
+    // Debug info for server logs only - more concise format
+    console.log(`${colors.cyan}[STATS]${colors.reset} Frames: ${completedFrames}/${effectiveTotalFrames} (${percentage.toFixed(1)}%)`);
+    console.log(`${colors.cyan}[STATS]${colors.reset} Times: Last=${lastFrameTime.toFixed(1)}s | Avg=${calculatedAvgFrameTime.toFixed(1)}s | Current=${timeSinceLastFrame.toFixed(1)}s | Elapsed=${formatTime(timeElapsed)}`);
+    
+    // Send only essential data to clients
     const message = JSON.stringify({
         type: 'update',
         completedFrames,
         totalFrames: effectiveTotalFrames,
         percentage,
-        timeElapsed,
-        eta,
-        lastFrameTime,
-        avgFrameTime,
-        // Add timestamps for more accurate client-side calculations
-        firstFrameTimestamp: firstFrameDetectionTime ? firstFrameDetectionTime / 1000 : 0,
-        lastFrameTimestamp: lastFrameDetectionTime ? lastFrameDetectionTime / 1000 : 0,
-        previousFrameTimestamp: previousFrameDetectionTime ? previousFrameDetectionTime / 1000 : 0,
-        renderStartTime: firstFrameDetectionTime ? firstFrameDetectionTime / 1000 : startTime / 1000
+        // Raw timestamps for client-side calculations
+        firstFrameTimestamp: firstFrameDetectionTime || 0,
+        lastFrameTimestamp: lastFrameDetectionTime || 0,
+        previousFrameTimestamp: previousFrameDetectionTime || 0,
+        serverTimestamp: Date.now() // Current server time
     });
-    
-    console.log(`Broadcasting progress: ${completedFrames}/${effectiveTotalFrames} (${percentage.toFixed(2)}%)`);
-    console.log(`Time elapsed: ${formatTime(timeElapsed)}, ETA: ${formatTime(eta)}`);
-    console.log(`Last frame time: ${lastFrameTime.toFixed(1)}s, Avg frame time: ${avgFrameTime.toFixed(1)}s`);
     
     wss.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
@@ -521,16 +514,45 @@ function updateFrameTimes() {
         const previousFrame = recentFrames[1];
         
         // Update frame detection times
+        const oldLastFrameTime = lastFrameTime;
         lastFrameDetectionTime = latestFrame.creationTime;
         previousFrameDetectionTime = previousFrame.creationTime;
         
         // Calculate last frame time
         lastFrameTime = (lastFrameDetectionTime - previousFrameDetectionTime) / 1000;
         
-        console.log(`${colors.cyan}[TIME_UPDATE]${colors.reset} Updated frame times based on file creation times:`);
-        console.log(`  Latest frame: ${latestFrame.file} (${new Date(latestFrame.creationTime).toISOString()})`);
-        console.log(`  Previous frame: ${previousFrame.file} (${new Date(previousFrame.creationTime).toISOString()})`);
-        console.log(`  Last frame time: ${lastFrameTime.toFixed(1)}s`);
+        // Set firstFrameDetectionTime if not already set
+        if (firstFrameDetectionTime === 0 && recentFrames.length > 0) {
+            // Get the oldest frame
+            const oldestFrame = recentFrames[recentFrames.length - 1];
+            firstFrameDetectionTime = oldestFrame.creationTime;
+            console.log(`${colors.cyan}[TIME_UPDATE]${colors.reset} Set first frame time to ${new Date(firstFrameDetectionTime).toISOString()}`);
+        }
+        
+        // Update completed frames count if needed
+        if (completedFrames < recentFrames.length) {
+            completedFrames = recentFrames.length;
+            console.log(`${colors.cyan}[TIME_UPDATE]${colors.reset} Updated completed frames to ${completedFrames}`);
+        }
+        
+        // Extract frame numbers for cleaner logging
+        const latestFrameNum = latestFrame.frameNumber || 'unknown';
+        const previousFrameNum = previousFrame.frameNumber || 'unknown';
+        
+        // Format timestamps for cleaner logging
+        const latestTime = new Date(latestFrame.creationTime).toISOString().split('T')[1].split('.')[0]; // HH:MM:SS format
+        const previousTime = new Date(previousFrame.creationTime).toISOString().split('T')[1].split('.')[0];
+        
+        console.log(`${colors.cyan}[TIME_UPDATE]${colors.reset} Frame times updated:`);
+        console.log(`  Latest: Frame #${latestFrameNum} @ ${latestTime}`);
+        console.log(`  Previous: Frame #${previousFrameNum} @ ${previousTime}`);
+        console.log(`  Last frame time: ${lastFrameTime.toFixed(1)}s (was ${oldLastFrameTime.toFixed(1)}s)`);
+        
+        // Broadcast progress update if the frame time has changed significantly
+        if (Math.abs(lastFrameTime - oldLastFrameTime) > 0.1) {
+            console.log(`${colors.cyan}[TIME_UPDATE]${colors.reset} Frame time changed significantly, broadcasting update`);
+            broadcastProgress();
+        }
     }
 }
 
@@ -542,60 +564,80 @@ const server = app.listen(port, () => {
     console.log(`${colors.green}${colors.bright}=== RENDER PROGRESS MONITOR ====${colors.reset}`);
     console.log(`${colors.cyan}SERVER_RUNNING: ${colors.yellow}http://localhost:${port}${colors.reset}`);
     
-    // Create WebSocket server
-    wss = new WebSocket.Server({ server });
-    
-    // Handle WebSocket connections
-    wss.on('connection', (ws) => {
-        console.log(`${colors.green}[WEBSOCKET]${colors.reset} New client connected`);
-        
-        // Add client to set
-        clients.add(ws);
-        
-        // Log current state before sending to client
-        console.log(`${colors.cyan}[DEBUG]${colors.reset} Current state before sending to new client:`, {
-            completedFrames,
-            totalFrames,
-            manualTotalFrames,
-            effectiveTotalFrames: manualTotalFrames !== null ? manualTotalFrames : totalFrames,
-            watchDir: currentWatchDir
-        });
-        
-        // Send initial state to client
-        const initialData = {
-            type: 'init',
-            completedFrames,
-            totalFrames: manualTotalFrames !== null ? manualTotalFrames : totalFrames,
-            currentDir: currentWatchDir,
-            // Calculate time elapsed from first frame detection, not server start time
-            timeElapsed: firstFrameDetectionTime ? (Date.now() - firstFrameDetectionTime) / 1000 : 0,
-            // Add timestamps for more accurate client-side calculations
-            firstFrameTimestamp: firstFrameDetectionTime ? firstFrameDetectionTime / 1000 : 0,
-            lastFrameTimestamp: lastFrameDetectionTime ? lastFrameDetectionTime / 1000 : 0,
-            previousFrameTimestamp: previousFrameDetectionTime ? previousFrameDetectionTime / 1000 : 0,
-            renderStartTime: firstFrameDetectionTime ? firstFrameDetectionTime / 1000 : startTime / 1000,
-            // Add frame time information
-            lastFrameTime: lastFrameDetectionTime && previousFrameDetectionTime 
-                ? (lastFrameDetectionTime - previousFrameDetectionTime) / 1000 
-                : 30,
-            avgFrameTime: 30,
-            eta: (totalFrames - completedFrames) * 30
-        };
-        
-        ws.send(JSON.stringify(initialData));
-        
-        // Handle client messages
-        ws.on('message', (message) => {
-            console.log(`${colors.cyan}[WEBSOCKET]${colors.reset} Received message: ${message}`);
-        });
-        
-        // Handle client disconnection
-        ws.on('close', () => {
-            console.log(`${colors.yellow}[WEBSOCKET]${colors.reset} Client disconnected`);
-            clients.delete(ws);
-        });
-    });
+    // Set up WebSocket server using the function
+    setupWebSocketServer(server);
     
     // Initialize with default directory
     initializeWatcher(currentWatchDir);
 });
+
+// Set up WebSocket server
+function setupWebSocketServer(server) {
+    wss = new WebSocket.Server({ server });
+    
+    wss.on('connection', (ws) => {
+        console.log(`${colors.green}[WEBSOCKET]${colors.reset} Client connected`);
+        
+        // Send initial state to the client
+        sendInitialState(ws);
+        
+        // Listen for messages from clients
+        ws.on('message', (message) => {
+            try {
+                const data = JSON.parse(message);
+                console.log(`${colors.green}[WEBSOCKET]${colors.reset} Received message:`, data);
+                
+                if (data.type === 'setTotalFrames') {
+                    // Validate the total frames value
+                    const newTotalFrames = parseInt(data.totalFrames, 10);
+                    
+                    if (Number.isInteger(newTotalFrames) && newTotalFrames > 0) {
+                        manualTotalFrames = newTotalFrames;
+                        console.log(`${colors.green}[WEBSOCKET]${colors.reset} Total frames set to ${manualTotalFrames}`);
+                        
+                        // Broadcast the updated progress immediately
+                        broadcastProgress();
+                    } else {
+                        console.log(`${colors.yellow}[WEBSOCKET]${colors.reset} Invalid total frames value: ${data.totalFrames}`);
+                    }
+                } else if (data.type === 'requestState') {
+                    // Send the current state to the requesting client
+                    console.log(`${colors.green}[WEBSOCKET]${colors.reset} State requested, sending current state`);
+                    sendInitialState(ws);
+                }
+            } catch (error) {
+                console.error(`${colors.red}[WEBSOCKET]${colors.reset} Error parsing message:`, error);
+            }
+        });
+        
+        ws.on('close', () => {
+            console.log(`${colors.yellow}[WEBSOCKET]${colors.reset} Client disconnected`);
+        });
+    });
+    
+    return wss;
+}
+
+// Function to send the initial state to a client
+function sendInitialState(ws) {
+    if (ws.readyState === WebSocket.OPEN) {
+        const effectiveTotalFrames = manualTotalFrames || totalFrames;
+        const percentage = (completedFrames / effectiveTotalFrames) * 100;
+        
+        // Send only essential data to clients
+        const message = JSON.stringify({
+            type: 'initialState',
+            completedFrames,
+            totalFrames: effectiveTotalFrames,
+            percentage,
+            // Raw timestamps for client-side calculations
+            firstFrameTimestamp: firstFrameDetectionTime || 0,
+            lastFrameTimestamp: lastFrameDetectionTime || 0,
+            previousFrameTimestamp: previousFrameDetectionTime || 0,
+            serverTimestamp: Date.now() // Current server time
+        });
+        
+        console.log(`${colors.green}[WEBSOCKET]${colors.reset} Sending initial state: ${completedFrames}/${effectiveTotalFrames} (${percentage.toFixed(2)}%)`);
+        ws.send(message);
+    }
+}

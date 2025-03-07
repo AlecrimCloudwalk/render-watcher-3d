@@ -3,7 +3,8 @@ const path = require('path');
 
 // Configuration
 const OUTPUT_DIR = './render_output';
-const INTERVAL_MS = 30000; // 30 seconds
+const MIN_INTERVAL_SEC = 15; // Minimum interval in seconds
+const MAX_INTERVAL_SEC = 30; // Maximum interval in seconds
 const FILE_EXTENSION = '.exr'; // Using .exr extension for render files
 const TOTAL_FRAMES = 100; // Total frames to generate
 
@@ -15,6 +16,12 @@ if (!fs.existsSync(OUTPUT_DIR)) {
 
 // Keep track of the current frame number
 let currentFrame = 0;
+
+// Function to get a random delay between min and max seconds
+function getRandomDelay() {
+    const delayMs = Math.floor(Math.random() * (MAX_INTERVAL_SEC - MIN_INTERVAL_SEC + 1) + MIN_INTERVAL_SEC) * 1000;
+    return delayMs;
+}
 
 // Function to generate a sequential frame file
 function generateSequentialFrame() {
@@ -44,16 +51,18 @@ function generateSequentialFrame() {
     // Stop when we reach the total number of frames
     if (currentFrame >= TOTAL_FRAMES) {
         console.log(`All ${TOTAL_FRAMES} frames generated. Stopping.`);
-        clearInterval(intervalId);
+        return;
     }
+    
+    // Schedule next frame with random delay
+    const nextDelay = getRandomDelay();
+    console.log(`Next frame will be generated in ${nextDelay/1000} seconds...`);
+    setTimeout(generateSequentialFrame, nextDelay);
 }
 
 // Generate a file immediately
 generateSequentialFrame();
 
-// Set up interval to generate files periodically
-console.log(`Starting file generation every ${INTERVAL_MS/1000} seconds...`);
+console.log(`Starting file generation with random intervals (${MIN_INTERVAL_SEC}-${MAX_INTERVAL_SEC} seconds)...`);
 console.log(`Will generate ${TOTAL_FRAMES} frames total.`);
-console.log(`Press Ctrl+C to stop`);
-
-const intervalId = setInterval(generateSequentialFrame, INTERVAL_MS); 
+console.log(`Press Ctrl+C to stop`); 

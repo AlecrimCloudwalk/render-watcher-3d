@@ -329,8 +329,8 @@
         
         .stats-value {
             font-size: 1rem;
-            font-weight: 600;
-            color: var(--color-text);
+            font-weight: 700;
+            color: var(--color-primary);
             font-family: 'Space Mono', monospace;
         }
         
@@ -604,6 +604,45 @@
             color: var(--color-text);
             font-weight: bold;
         }
+        
+        .status-indicator {
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.9rem;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+        
+        .current-frame-indicator {
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-weight: bold;
+            transition: color 0.3s, background-color 0.3s;
+        }
+        
+        .current-frame-normal {
+            color: var(--color-text);
+        }
+        
+        .current-frame-warning {
+            background-color: rgba(255, 165, 0, 0.2);
+            color: #ffa500;
+        }
+        
+        .current-frame-alert {
+            background-color: rgba(255, 0, 0, 0.2);
+            color: #ff5555;
+        }
+        
+        .status-active {
+            background-color: rgba(0, 255, 0, 0.2);
+            color: #00ff00;
+        }
+        
+        .status-paused {
+            background-color: rgba(255, 165, 0, 0.2);
+            color: #ffa500;
+        }
     </style>
 </head>
 <body>
@@ -632,12 +671,16 @@
                         <span class="stats-value" id="percentage">0%</span>
                     </div>
                     <div class="stats-row">
-                        <span class="stats-label">Time Elapsed</span>
+                        <span class="stats-label">Elapsed</span>
                         <span class="stats-value" id="timeElapsed">0s</span>
                     </div>
                     <div class="stats-row">
                         <span class="stats-label">ETA</span>
                         <span class="stats-value" id="eta">0s</span>
+                    </div>
+                    <div class="stats-row">
+                        <span class="stats-label">Current Frame</span>
+                        <span class="stats-value current-frame-indicator" id="currentFrameTime">0s</span>
                     </div>
                     <div class="stats-row">
                         <span class="stats-label">Last Frame</span>
@@ -646,10 +689,6 @@
                     <div class="stats-row">
                         <span class="stats-label">Avg Per Frame</span>
                         <span class="stats-value" id="avgFrameTime">0s</span>
-                    </div>
-                    <div class="stats-row">
-                        <span class="stats-label">Frames/Hour</span>
-                        <span class="stats-value" id="framesPerHour">0</span>
                     </div>
                 </div>
             </div>

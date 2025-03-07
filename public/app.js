@@ -28,6 +28,23 @@ const PARTICLE_EMISSION_COOLDOWN = 5000; // 5 second cooldown between emissions
 // Global variable to store manually set total frames
 window.manualTotalFrames = null;
 
+// Track last frame data for comparison
+let lastCompletedFrames = 0;
+let lastTotalFrames = 1;
+
+// Global variables for Three.js
+let socket = null;
+let scene, camera, renderer;
+let progressRing, progressFill;
+let colorPalette = [];
+let isWebGLAvailable = true;
+
+// Global variables to store timestamps
+let firstFrameTimestamp = 0;
+let lastFrameTimestamp = 0;
+let previousFrameTimestamp = 0;
+let serverClientTimeDiff = 0; // Difference between server and client time
+
 function generateColorPalette() {
     // Generate a random hue (0-360)
     const hue = Math.floor(Math.random() * 360);
@@ -135,11 +152,13 @@ function checkWebGLCapabilities() {
 const webGLCapabilities = checkWebGLCapabilities();
 
 // Three.js setup
-const scene = new THREE.Scene();
+// Use the already declared scene variable instead of redeclaring
+scene = new THREE.Scene();
 scene.background = null; // Remove solid background to allow dot pattern to show through
 
 // Create a responsive camera setup
-let camera, aspect, frustumSize;
+// Use the already declared camera variable
+let aspect, frustumSize;
 function setupCamera() {
     aspect = window.innerWidth / window.innerHeight;
     frustumSize = aspect < 1 ? 15 : 10; // Larger frustum size for portrait mode
@@ -162,7 +181,8 @@ function setupCamera() {
 setupCamera();
 
 // Create renderer and append to container
-const renderer = new THREE.WebGLRenderer({ 
+// Use the already declared renderer variable instead of redeclaring
+renderer = new THREE.WebGLRenderer({ 
     antialias: true, 
     alpha: true,
     preserveDrawingBuffer: true,
@@ -280,7 +300,7 @@ const segmentCount = 60; // Number of segments in the ring
 const ringRadius = 4; // Radius of the progress ring
 const ringThickness = 0.4; // Thickness of the progress ring
 let progressSegments = []; // Changed from const to let
-let progressRing;
+// Use the already declared progressRing variable
 
 // Create progress ring visualization
 function createProgressRing() {
@@ -932,6 +952,9 @@ function init() {
     //fetchServerInfo();
     
     initScrollBehavior(); // Add this line to initialize scroll behavior
+    
+    // Set up continuous updates for time-based values
+    setupContinuousUpdates();
 }
 
 // Animation loop
@@ -1093,39 +1116,41 @@ function initSettingsPanel() {
 }
 
 // Modify the WebSocket message handler to use the animation
-let socket;
+// Remove this redeclaration of socket
 
 // Initialize WebSocket connection
 function initWebSocket() {
-    // Close existing connection if any
-    if (socket) {
-        socket.close();
-    }
-    
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}`;
     
-    console.log('Connecting to WebSocket at:', wsUrl);
+    console.log(`Connecting to WebSocket at ${wsUrl}`);
     
     socket = new WebSocket(wsUrl);
     
     socket.onopen = function() {
         console.log('WebSocket connection established');
+        
+        // Immediately request current state when connection is established
+        requestCurrentState();
+    };
+    
+    socket.onmessage = handleWebSocketMessage;
+    
+    socket.onerror = function(error) {
+        console.error('WebSocket error:', error);
     };
     
     socket.onclose = function() {
         console.log('WebSocket connection closed');
         
         // Try to reconnect after a delay
-        setTimeout(initWebSocket, 5000);
+        setTimeout(function() {
+            console.log('Attempting to reconnect WebSocket...');
+            initWebSocket();
+        }, 3000);
     };
     
-    socket.onerror = function(error) {
-        console.error('WebSocket error:', error);
-    };
-    
-    // Use our new handler function with reduced logging
-    socket.onmessage = handleWebSocketMessage;
+    return socket;
 }
 
 // Initialize WebSocket connection when the page loads
@@ -1228,80 +1253,160 @@ function initFrameCounter() {
         const currentText = frameCounter.textContent;
         const [current, total] = currentText.split('/').map(num => parseInt(num, 10) || 0);
         
-        // Create input for editing total frames
+        // Get theme colors
+        const colors = getComputedStyle(document.documentElement);
+        const bgColor = colors.getPropertyValue('--color-surface').trim() || '#1a1e2e';
+        const textColor = colors.getPropertyValue('--color-text').trim() || '#f0f2f5';
+        const accentColor = colors.getPropertyValue('--color-accent').trim() || '#f0b040';
+        
+        // Create a modal container
+        const modalContainer = document.createElement('div');
+        modalContainer.style.position = 'fixed';
+        modalContainer.style.top = '50%';
+        modalContainer.style.left = '50%';
+        modalContainer.style.transform = 'translate(-50%, -50%)';
+        modalContainer.style.zIndex = '9999';
+        modalContainer.style.background = bgColor;
+        modalContainer.style.padding = '20px';
+        modalContainer.style.borderRadius = '10px';
+        modalContainer.style.border = `2px solid ${accentColor}`;
+        modalContainer.style.boxShadow = '0 0 30px rgba(0, 0, 0, 0.8)';
+        
+        // Create a label
+        const label = document.createElement('div');
+        label.textContent = 'Edit Total Frames:';
+        label.style.color = textColor;
+        label.style.marginBottom = '10px';
+        label.style.fontFamily = "'Space Mono', monospace";
+        label.style.fontSize = '1.5rem';
+        label.style.textAlign = 'center';
+        
+        // Create input
         const input = document.createElement('input');
         input.type = 'text';
-        input.value = total;
-        input.style.background = 'rgba(0, 0, 0, 0.7)';
-        input.style.color = 'white';
-        input.style.border = '1px solid var(--color-primary)';
+        input.value = total || 0;
+        input.style.background = bgColor;
+        input.style.color = textColor;
+        input.style.border = `2px solid ${accentColor}`;
+        input.style.borderRadius = '4px';
         input.style.padding = '0.5rem';
-        input.style.width = '100px';
-        input.style.textAlign = 'center';
         input.style.fontSize = '2rem';
+        input.style.fontWeight = 'bold';
+        input.style.width = '200px';
+        input.style.textAlign = 'center';
+        input.style.fontFamily = "'Space Mono', monospace";
+        input.style.display = 'block';
+        input.style.margin = '0 auto';
         
-        // Replace the counter with the input
-        const originalContent = frameCounter.innerHTML;
-        frameCounter.innerHTML = '';
-        frameCounter.appendChild(document.createTextNode(`${current}/`));
-        frameCounter.appendChild(input);
+        // Create buttons
+        const buttonContainer = document.createElement('div');
+        buttonContainer.style.display = 'flex';
+        buttonContainer.style.justifyContent = 'center';
+        buttonContainer.style.marginTop = '15px';
+        buttonContainer.style.gap = '10px';
         
-        // Focus the input
-        input.focus();
+        const saveButton = document.createElement('button');
+        saveButton.textContent = 'Save';
+        saveButton.style.background = accentColor;
+        saveButton.style.color = '#000000';
+        saveButton.style.border = 'none';
+        saveButton.style.borderRadius = '4px';
+        saveButton.style.padding = '8px 15px';
+        saveButton.style.cursor = 'pointer';
+        saveButton.style.fontFamily = "'Space Mono', monospace";
+        saveButton.style.fontWeight = 'bold';
         
-        // Handle input blur
-        input.addEventListener('blur', () => {
+        const cancelButton = document.createElement('button');
+        cancelButton.textContent = 'Cancel';
+        cancelButton.style.background = 'rgba(255, 255, 255, 0.1)';
+        cancelButton.style.color = textColor;
+        cancelButton.style.border = 'none';
+        cancelButton.style.borderRadius = '4px';
+        cancelButton.style.padding = '8px 15px';
+        cancelButton.style.cursor = 'pointer';
+        cancelButton.style.fontFamily = "'Space Mono', monospace";
+        
+        // Function to close the modal
+        const closeModal = () => {
+            if (document.body.contains(modalContainer)) {
+                document.body.removeChild(modalContainer);
+            }
+        };
+        
+        // Add event listeners
+        saveButton.addEventListener('click', () => {
             const newTotal = parseInt(input.value, 10) || total;
             frameCounter.textContent = `${current}/${newTotal}`;
-            
-            // Update total frames via WebSocket
             setTotalFramesViaWebSocket(newTotal);
+            closeModal();
         });
         
-        // Handle input keydown
+        cancelButton.addEventListener('click', () => {
+            closeModal();
+        });
+        
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
-                const newTotal = parseInt(input.value, 10) || total;
-                frameCounter.textContent = `${current}/${newTotal}`;
-                
-                // Update total frames via WebSocket
-                setTotalFramesViaWebSocket(newTotal);
-                
-                // Remove focus
-                input.blur();
+                saveButton.click();
             } else if (e.key === 'Escape') {
-                // Restore original content
-                frameCounter.innerHTML = originalContent;
+                cancelButton.click();
             }
         });
+        
+        // Close modal when clicking outside
+        modalContainer.addEventListener('click', (e) => {
+            if (e.target === modalContainer) {
+                closeModal();
+            }
+        });
+        
+        // Assemble the container
+        buttonContainer.appendChild(saveButton);
+        buttonContainer.appendChild(cancelButton);
+        modalContainer.appendChild(label);
+        modalContainer.appendChild(input);
+        modalContainer.appendChild(buttonContainer);
+        
+        // Add to body
+        document.body.appendChild(modalContainer);
+        
+        // Focus the input
+        setTimeout(() => {
+            input.focus();
+            input.select();
+        }, 0);
     });
-    
-    return frameCounter;
 }
 
 // Helper function to format time in a human-readable way
 function formatTime(seconds) {
-    if (seconds === undefined || seconds === null || seconds === Infinity || isNaN(seconds)) {
-        return 'calculating...';
+    // Return 'N/A' for undefined, null, Infinity, or NaN
+    if (seconds === undefined || seconds === null || !isFinite(seconds) || isNaN(seconds)) {
+        return 'N/A';
     }
     
-    // Ensure seconds is a number
+    // Convert to number and handle negative values
     seconds = Number(seconds);
-    
-    let result;
     if (seconds < 0) {
-        result = '0s';
-    } else if (seconds < 60) {
-        result = `${Math.floor(seconds)}s`;
-    } else if (seconds < 3600) {
-        const minutes = Math.floor(seconds / 60);
-        const remainingSeconds = Math.floor(seconds % 60);
-        result = `${minutes}m ${remainingSeconds}s`;
-    } else {
-        const hours = Math.floor(seconds / 3600);
-        const minutes = Math.floor((seconds % 3600) / 60);
-        result = `${hours}h ${minutes}m`;
+        return 'N/A';
     }
+    
+    // Format the time
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    
+    let result = '';
+    
+    if (hours > 0) {
+        result += `${hours}h `;
+    }
+    
+    if (minutes > 0 || hours > 0) {
+        result += `${minutes}m `;
+    }
+    
+    result += `${secs}s`;
     
     return result;
 }
@@ -1745,75 +1850,161 @@ function addParticles(frontHalf, backHalf, count = 30) {
 
 // Function to update the stats panel with accurate information
 function updateStatsPanel(data) {
-    const statsPanel = document.getElementById('statsPanel');
-    if (!statsPanel) return;
+    // Store timestamps for continuous updates
+    if (data.firstFrameTimestamp) firstFrameTimestamp = data.firstFrameTimestamp;
+    if (data.lastFrameTimestamp) lastFrameTimestamp = data.lastFrameTimestamp;
+    if (data.previousFrameTimestamp) previousFrameTimestamp = data.previousFrameTimestamp;
     
-    // Calculate percentage
-    const percentage = data.percentage || 
-        (data.completedFrames !== undefined && data.totalFrames ? 
-        (data.completedFrames / data.totalFrames) * 100 : 0);
-    
-    // Format time values - timeElapsed should be coming directly from the server
-    // based on the creation time of the first file
-    const timeElapsed = formatTime(data.timeElapsed || 0);
-    
-    // ETA is also calculated on the server side
-    const eta = formatTime(data.eta || 0);
-    
-    // Format frame times with proper units
-    let lastFrameTime = 'N/A';
-    if (data.lastFrameTime !== undefined) {
-        // The server should be calculating this as the difference between the last two frames
-        lastFrameTime = data.lastFrameTime < 60 ? 
-            data.lastFrameTime.toFixed(1) + 's' : 
-            formatTime(data.lastFrameTime);
+    // Calculate time difference between server and client
+    if (data.serverTimestamp) {
+        serverClientTimeDiff = data.serverTimestamp - Date.now();
     }
     
-    let avgFrameTime = 'N/A';
-    if (data.avgFrameTime !== undefined) {
-        avgFrameTime = data.avgFrameTime < 60 ? 
-            data.avgFrameTime.toFixed(1) + 's' : 
-            formatTime(data.avgFrameTime);
+    // Calculate all time-based values on the client side
+    const now = Date.now();
+    
+    // Time elapsed since first frame
+    const timeElapsed = firstFrameTimestamp ? (now - firstFrameTimestamp + serverClientTimeDiff) / 1000 : 0;
+    
+    // Time since last frame was completed (current frame time)
+    const timeSinceLastFrame = lastFrameTimestamp ? (now - lastFrameTimestamp + serverClientTimeDiff) / 1000 : 0;
+    
+    // Last frame time (time between the last two frames)
+    const lastFrameTime = (lastFrameTimestamp && previousFrameTimestamp) 
+        ? (lastFrameTimestamp - previousFrameTimestamp) / 1000 
+        : 0;
+    
+    // Average frame time
+    const avgFrameTime = (data.completedFrames > 1 && firstFrameTimestamp && lastFrameTimestamp)
+        ? (lastFrameTimestamp - firstFrameTimestamp) / 1000 / (data.completedFrames - 1)
+        : lastFrameTime || 0;
+    
+    // Calculate ETA
+    let eta = null;
+    if (avgFrameTime > 0 && data.completedFrames < data.totalFrames) {
+        eta = avgFrameTime * (data.totalFrames - data.completedFrames);
     }
     
-    // Calculate frames per hour
-    const framesPerHour = data.avgFrameTime && data.avgFrameTime > 0 ? 
-        Math.round(3600 / data.avgFrameTime) : 
-        'N/A';
-    
-    // Update individual elements if they exist
-    const percentageEl = document.getElementById('percentage');
-    if (percentageEl) {
-        percentageEl.textContent = percentage.toFixed(1) + '%';
+    // Update percentage
+    const percentageElement = document.getElementById('percentage');
+    if (percentageElement) {
+        percentageElement.textContent = `${data.percentage.toFixed(1)}%`;
     }
     
-    const timeElapsedEl = document.getElementById('timeElapsed');
-    if (timeElapsedEl) {
-        timeElapsedEl.textContent = timeElapsed;
+    // Update time elapsed
+    const timeElapsedElement = document.getElementById('timeElapsed');
+    if (timeElapsedElement) {
+        timeElapsedElement.textContent = formatTime(timeElapsed);
     }
     
-    const etaEl = document.getElementById('eta');
-    if (etaEl) {
-        etaEl.textContent = eta;
+    // Update ETA - only show N/A if we don't have an average frame time or if rendering is complete
+    const etaElement = document.getElementById('eta');
+    if (etaElement) {
+        etaElement.textContent = eta !== null ? formatTime(eta) : 'N/A';
     }
     
-    const lastFrameTimeEl = document.getElementById('lastFrameTime');
-    if (lastFrameTimeEl) {
-        lastFrameTimeEl.textContent = lastFrameTime;
+    // Update last frame time
+    const lastFrameTimeElement = document.getElementById('lastFrameTime');
+    if (lastFrameTimeElement) {
+        lastFrameTimeElement.textContent = formatTime(lastFrameTime);
     }
     
-    const avgFrameTimeEl = document.getElementById('avgFrameTime');
-    if (avgFrameTimeEl) {
-        avgFrameTimeEl.textContent = avgFrameTime;
+    // Update average frame time
+    const avgFrameTimeElement = document.getElementById('avgFrameTime');
+    if (avgFrameTimeElement) {
+        avgFrameTimeElement.textContent = formatTime(avgFrameTime);
     }
     
-    const framesPerHourEl = document.getElementById('framesPerHour');
-    if (framesPerHourEl) {
-        framesPerHourEl.textContent = framesPerHour;
+    // Update current frame time (time since last frame was completed)
+    const currentFrameTimeElement = document.getElementById('currentFrameTime');
+    if (currentFrameTimeElement) {
+        currentFrameTimeElement.textContent = formatTime(timeSinceLastFrame);
+        
+        // Reset classes
+        currentFrameTimeElement.classList.remove('current-frame-normal', 'current-frame-warning', 'current-frame-alert');
+        
+        // Set color based on comparison with average and last frame times
+        if (timeSinceLastFrame > 0 && avgFrameTime > 0) {
+            // Calculate thresholds for warning and alert states
+            const warningThreshold = Math.max(avgFrameTime * 1.5, lastFrameTime * 1.5);
+            const alertThreshold = Math.max(avgFrameTime * 3, lastFrameTime * 3);
+            
+            if (timeSinceLastFrame > alertThreshold) {
+                currentFrameTimeElement.classList.add('current-frame-alert');
+            } else if (timeSinceLastFrame > warningThreshold) {
+                currentFrameTimeElement.classList.add('current-frame-warning');
+            } else {
+                currentFrameTimeElement.classList.add('current-frame-normal');
+            }
+        } else {
+            currentFrameTimeElement.classList.add('current-frame-normal');
+        }
+    }
+    
+    // Update frame counter
+    const frameCounterElement = document.getElementById('frame-counter');
+    if (frameCounterElement) {
+        frameCounterElement.textContent = `${data.completedFrames}/${data.totalFrames}`;
     }
     
     // Update progress bar
-    updateProgressBar(percentage);
+    updateProgressBar(data.percentage);
+    
+    // Update visualization
+    updateVisualization(data.completedFrames, data.totalFrames);
+}
+
+// Set up a timer to continuously update time-based values
+function setupContinuousUpdates() {
+    // Update every 100ms for smooth time display
+    setInterval(() => {
+        if (lastFrameTimestamp > 0) {
+            // Only update if we have received data from the server
+            const now = Date.now();
+            
+            // Time since last frame was completed (current frame time)
+            const timeSinceLastFrame = (now - lastFrameTimestamp + serverClientTimeDiff) / 1000;
+            
+            // Update current frame time display
+            const currentFrameTimeElement = document.getElementById('currentFrameTime');
+            if (currentFrameTimeElement) {
+                currentFrameTimeElement.textContent = formatTime(timeSinceLastFrame);
+                
+                // Calculate thresholds for warning and alert states
+                const lastFrameTime = (lastFrameTimestamp && previousFrameTimestamp) 
+                    ? (lastFrameTimestamp - previousFrameTimestamp) / 1000 
+                    : 0;
+                
+                const avgFrameTime = (completedFrames > 1 && firstFrameTimestamp && lastFrameTimestamp)
+                    ? (lastFrameTimestamp - firstFrameTimestamp) / 1000 / (completedFrames - 1)
+                    : lastFrameTime || 0;
+                
+                const warningThreshold = Math.max(avgFrameTime * 1.5, lastFrameTime * 1.5);
+                const alertThreshold = Math.max(avgFrameTime * 3, lastFrameTime * 3);
+                
+                // Reset classes
+                currentFrameTimeElement.classList.remove('current-frame-normal', 'current-frame-warning', 'current-frame-alert');
+                
+                // Set color based on thresholds
+                if (timeSinceLastFrame > alertThreshold) {
+                    currentFrameTimeElement.classList.add('current-frame-alert');
+                } else if (timeSinceLastFrame > warningThreshold) {
+                    currentFrameTimeElement.classList.add('current-frame-warning');
+                } else {
+                    currentFrameTimeElement.classList.add('current-frame-normal');
+                }
+            }
+            
+            // Update elapsed time display
+            if (firstFrameTimestamp > 0) {
+                const timeElapsed = (now - firstFrameTimestamp + serverClientTimeDiff) / 1000;
+                const timeElapsedElement = document.getElementById('timeElapsed');
+                if (timeElapsedElement) {
+                    timeElapsedElement.textContent = formatTime(timeElapsed);
+                }
+            }
+        }
+    }, 100);
 }
 
 // Connect to WebSocket server
@@ -1911,107 +2102,74 @@ document.addEventListener('DOMContentLoaded', function() {
 
 // Function to handle WebSocket messages with reduced logging
 function handleWebSocketMessage(event) {
-    // Check if we're within the cooldown period
-    const currentTime = Date.now();
-    if (currentTime - lastWebSocketUpdateTime < WEBSOCKET_UPDATE_COOLDOWN) {
-        return;
-    }
-    
-    // Update the last update time
-    lastWebSocketUpdateTime = currentTime;
-    
     try {
         const data = JSON.parse(event.data);
         
-        // Log only occasionally to reduce noise
-        if (Math.random() < 0.1) {
-            console.log('Received WebSocket message:', data);
-        }
-        
-        if (data.type === 'init') {
-            console.log('Received init data:', data);
-            
-            // Update the directory path
-            updateDirectoryPath(data.currentDir);
-            
-            // Store the current values
-            const oldCompletedFrames = completedFrames || 0;
-            const oldTotalFrames = totalFrames || 1;
-            const oldCompletionRatio = oldTotalFrames > 0 ? oldCompletedFrames / oldTotalFrames : 0;
-            
-            // Update the global variables
-            completedFrames = data.completedFrames || 0;
-            totalFrames = data.totalFrames || totalFrames;
-            
-            // Use manually set total frames if available
-            const effectiveTotalFrames = window.manualTotalFrames || totalFrames;
-            
-            // Calculate the new completion ratio
-            const newCompletionRatio = effectiveTotalFrames > 0 ? completedFrames / effectiveTotalFrames : 0;
-            
-            // Check if frames have changed
-            const framesChanged = oldCompletedFrames !== completedFrames;
-            
-            // Log progress change
-            console.log('Progress change on init:', { 
-                oldRatio: oldCompletionRatio.toFixed(3), 
-                newRatio: newCompletionRatio.toFixed(3),
-                change: (newCompletionRatio - oldCompletionRatio).toFixed(3),
-                timestamp: new Date().toISOString()
-            });
-            
-            // Animate the transition with a longer duration for init (feels more impressive)
-            if (Math.abs(newCompletionRatio - oldCompletionRatio) > 0.01) {
-                animateProgressFilling(oldCompletionRatio, newCompletionRatio, 3000, framesChanged);
-            } else {
-                // Just update without animation for minor changes
-                updateVisualization(completedFrames, effectiveTotalFrames);
-                updateProgressBar(newCompletionRatio * 100);
+        if (data.type === 'update' || data.type === 'initialState') {
+            // Log the data occasionally to avoid console spam
+            if (Math.random() < 0.05 || data.type === 'initialState') {
+                console.log(`Received ${data.type}:`, data);
             }
             
-            // Update the frame counter
-            if (frameCounter) {
-                frameCounter.textContent = `${completedFrames}/${effectiveTotalFrames}`;
-            }
-            
-            // Update stats panel
-            updateStatsPanel(data);
-        } else if (data.type === 'update') {
-            // Store the current values
+            // Store current values for comparison in next update
             const oldCompletedFrames = completedFrames;
+            const oldTotalFrames = totalFrames;
             
-            // Use manually set total frames if available
-            const effectiveTotalFrames = window.manualTotalFrames || totalFrames;
-            
-            const oldCompletionRatio = effectiveTotalFrames > 0 ? oldCompletedFrames / effectiveTotalFrames : 0;
-            
-            // Update completed frames
+            // Update global variables
             completedFrames = data.completedFrames;
+            totalFrames = data.totalFrames;
             
-            // Calculate the new completion ratio
-            const newCompletionRatio = effectiveTotalFrames > 0 ? completedFrames / effectiveTotalFrames : 0;
-            
-            // Check if frames have changed
-            const framesChanged = oldCompletedFrames !== completedFrames;
-            
-            // Animate the transition
-            if (Math.abs(newCompletionRatio - oldCompletionRatio) > 0.01) {
-                animateProgressFilling(oldCompletionRatio, newCompletionRatio, 1000, framesChanged);
-            } else {
-                // Just update without animation for minor changes
-                updateVisualization(completedFrames, effectiveTotalFrames);
-                updateProgressBar(newCompletionRatio * 100);
-            }
-            
-            // Update the frame counter
-            if (frameCounter) {
-                frameCounter.textContent = `${completedFrames}/${effectiveTotalFrames}`;
-            }
-            
-            // Update stats panel
+            // Update the stats panel with the data
             updateStatsPanel(data);
+            
+            // If frames have changed, animate the progress filling
+            if (oldCompletedFrames !== data.completedFrames) {
+                const oldRatio = oldCompletedFrames / oldTotalFrames;
+                const newRatio = data.completedFrames / data.totalFrames;
+                
+                // Only animate if there's a significant change
+                if (Math.abs(newRatio - oldRatio) > 0.001) {
+                    animateProgressFilling(oldRatio, newRatio, 1000, true);
+                }
+                
+                // Pop particles for each new frame
+                for (let i = oldCompletedFrames + 1; i <= data.completedFrames; i++) {
+                    popParticles(i);
+                }
+            }
+        } else if (data.type === 'serverInfo') {
+            // Handle server info message
+            console.log('Received server info:', data);
+            
+            // Update server info display
+            const serverInfoElement = document.getElementById('serverInfo');
+            if (serverInfoElement) {
+                serverInfoElement.innerHTML = `
+                    <div>Server Version: ${data.version || 'Unknown'}</div>
+                    <div>Node.js: ${data.nodeVersion || 'Unknown'}</div>
+                    <div>Platform: ${data.platform || 'Unknown'}</div>
+                `;
+            }
+            
+            // Update current directory display
+            const currentDirElement = document.getElementById('currentDir');
+            if (currentDirElement && data.watchDir) {
+                currentDirElement.textContent = `Watching: ${data.watchDir}`;
+            }
         }
-    } catch (e) {
-        console.error('Error processing WebSocket message:', e);
+    } catch (error) {
+        console.error('Error handling WebSocket message:', error);
+    }
+}
+
+// Function to request the current state from the server
+function requestCurrentState() {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        console.log('Requesting current state from server');
+        socket.send(JSON.stringify({
+            type: 'requestState'
+        }));
+    } else {
+        console.warn('Cannot request state: WebSocket not connected');
     }
 }
