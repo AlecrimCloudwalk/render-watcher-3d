@@ -45,6 +45,10 @@ let lastFrameTimestamp = 0;
 let previousFrameTimestamp = 0;
 let serverClientTimeDiff = 0; // Difference between server and client time
 
+// Track animation state
+let isAnimatingProgress = false;
+let pendingAnimationRequest = null;
+
 function generateColorPalette() {
     // Generate a random hue (0-360)
     const hue = Math.floor(Math.random() * 360);
@@ -530,10 +534,24 @@ function updateVisualization(completedFrames, totalFrames) {
         return;
     }
     
-    // Check if we're within the cooldown period - use a very short cooldown for animations
+    // Check if we're within the cooldown period - use a longer cooldown to prevent rapid updates
     const currentTime = Date.now();
-    if (currentTime - lastVisualizationUpdateTime < 16) { // 16ms = ~60fps
-        // Skip this update if it's too soon after the last one
+    if (currentTime - lastVisualizationUpdateTime < 100) { // 100ms cooldown
+        // If we're already animating, don't schedule another update
+        if (isAnimatingProgress) {
+            return;
+        }
+        
+        // Cancel any pending animation request
+        if (pendingAnimationRequest) {
+            cancelAnimationFrame(pendingAnimationRequest);
+        }
+        
+        // Schedule an update for later
+        pendingAnimationRequest = requestAnimationFrame(() => {
+            pendingAnimationRequest = null;
+            updateVisualization(completedFrames, totalFrames);
+        });
         return;
     }
     
@@ -560,7 +578,7 @@ function updateVisualization(completedFrames, totalFrames) {
     // Calculate completion ratio based on effective total frames
     const completionRatio = effectiveTotalFrames > 0 ? completedFrames / effectiveTotalFrames : 0;
     const completedSegments = Math.floor(completionRatio * segmentCount);
-    const partialCompletion = (completionRatio * segmentCount) % 1; // Fractional part for smooth transitions
+    const partialCompletion = (completionRatio * segmentCount) % 1;
     
     // Log detailed segment information (but not too frequently)
     if (Math.random() < 0.01) {
@@ -1058,13 +1076,53 @@ function initSettingsPanel() {
     const settingsPanel = document.getElementById('settings-panel');
     const settingsClose = document.getElementById('settings-close');
     
-    settingsToggle.addEventListener('click', () => {
+    // Function to close the settings panel
+    const closeSettingsPanel = () => {
+        settingsPanel.classList.remove('open');
+        // Remove event listeners when closing
+        document.removeEventListener('keydown', handleKeyDown);
+        document.removeEventListener('click', handleClickOutside);
+    };
+    
+    // Open settings panel when toggle is clicked
+    settingsToggle.addEventListener('click', (e) => {
+        e.stopPropagation(); // Prevent the click from immediately triggering the outside click handler
         settingsPanel.classList.add('open');
+        
+        // Add event listeners for closing when the panel is open
+        // Use a slight delay to avoid immediate triggering
+        setTimeout(() => {
+            document.addEventListener('keydown', handleKeyDown);
+            document.addEventListener('click', handleClickOutside);
+        }, 100);
     });
     
-    settingsClose.addEventListener('click', () => {
-        settingsPanel.classList.remove('open');
+    // Close settings panel when close button is clicked
+    settingsClose.addEventListener('click', (e) => {
+        e.stopPropagation(); // Prevent event from bubbling
+        closeSettingsPanel();
     });
+    
+    // Prevent clicks inside the panel from closing it
+    settingsPanel.addEventListener('click', (e) => {
+        e.stopPropagation(); // Stop propagation to prevent document click handler from firing
+    });
+    
+    // Handle ESC key press
+    function handleKeyDown(e) {
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            closeSettingsPanel();
+        }
+    }
+    
+    // Handle clicks outside the settings panel
+    function handleClickOutside(e) {
+        // If the click is not on the settings panel or the toggle button, close the panel
+        if (!settingsPanel.contains(e.target) && !settingsToggle.contains(e.target)) {
+            closeSettingsPanel();
+        }
+    }
     
     // Add drag and drop functionality to the directory input
     const dirInput = document.getElementById('manualDirPath');
@@ -1177,28 +1235,40 @@ fetchServerInfo();
 
 // Function to set total frames via WebSocket
 function setTotalFramesViaWebSocket(totalFrames) {
-    if (!totalFrames || isNaN(parseInt(totalFrames))) {
-        console.error('Invalid total frames value:', totalFrames);
-        return false;
-    }
-    
-    const numFrames = parseInt(totalFrames);
-    if (numFrames <= 0) {
-        console.error('Total frames must be greater than 0');
-        return false;
-    }
-    
-    // Send the total frames to the server via WebSocket
+    console.log(`setTotalFramesViaWebSocket called with totalFrames=${totalFrames}`);
     if (socket && socket.readyState === WebSocket.OPEN) {
+        console.log('WebSocket is open, sending message');
         socket.send(JSON.stringify({
             type: 'setTotalFrames',
-            totalFrames: numFrames
+            totalFrames: totalFrames
         }));
-        console.log('Sent total frames to server:', numFrames);
+        console.log('WebSocket message sent');
         return true;
     } else {
         console.error('WebSocket not connected, cannot set total frames');
-        return false;
+        // Try to use the HTTP API as fallback
+        fetch('/api/set-total-frames', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ totalFrames })
+        })
+        .then(response => response.json())
+        .then(data => {
+            console.log('HTTP API response:', data);
+            if (data.success) {
+                console.log('Successfully set total frames via HTTP API');
+                return true;
+            } else {
+                console.error('Failed to set total frames via HTTP API:', data.error);
+                return false;
+            }
+        })
+        .catch(error => {
+            console.error('Error setting total frames via HTTP API:', error);
+            return false;
+        });
     }
 }
 
@@ -1211,7 +1281,7 @@ function updateProgressBar(percentage) {
         progressFill.style.width = `${validPercentage}%`;
         
         // Occasionally log progress bar updates
-        if (Math.random() < 0.1) {
+        if (Math.random() < 0.01) { // Reduced logging frequency
             console.log(`Progress bar updated: ${validPercentage.toFixed(1)}%`);
         }
     }
@@ -1250,36 +1320,94 @@ function initFrameCounter() {
     }
     
     frameCounter.addEventListener('click', () => {
-        const currentText = frameCounter.textContent;
-        const [current, total] = currentText.split('/').map(num => parseInt(num, 10) || 0);
+        // Check if a modal is already open and remove it first
+        const existingOverlay = document.querySelector('.frame-edit-overlay');
+        const existingModal = document.querySelector('.frame-edit-modal');
         
-        // Get theme colors
-        const colors = getComputedStyle(document.documentElement);
-        const bgColor = colors.getPropertyValue('--color-surface').trim() || '#1a1e2e';
-        const textColor = colors.getPropertyValue('--color-text').trim() || '#f0f2f5';
-        const accentColor = colors.getPropertyValue('--color-accent').trim() || '#f0b040';
+        if (existingOverlay || existingModal) {
+            console.log('Found existing modal, removing it first');
+            if (existingOverlay) document.body.removeChild(existingOverlay);
+            if (existingModal) document.body.removeChild(existingModal);
+        }
+        
+        const [current, total] = frameCounter.textContent.split('/').map(num => parseInt(num.trim(), 10));
+        
+        // Create overlay for capturing outside clicks
+        const overlay = document.createElement('div');
+        overlay.className = 'frame-edit-overlay'; // Add class for easy selection
+        overlay.style.position = 'fixed';
+        overlay.style.top = '0';
+        overlay.style.left = '0';
+        overlay.style.width = '100%';
+        overlay.style.height = '100%';
+        overlay.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+        overlay.style.zIndex = '9998'; // Just below the modal
+        
+        // Get theme colors from CSS variables
+        const computedStyle = getComputedStyle(document.documentElement);
+        const textColor = computedStyle.getPropertyValue('--color-text').trim();
+        const textSecondaryColor = computedStyle.getPropertyValue('--color-text-secondary').trim();
+        const bgColor = computedStyle.getPropertyValue('--color-background').trim();
+        const surfaceColor = computedStyle.getPropertyValue('--color-surface').trim();
+        const primaryColor = computedStyle.getPropertyValue('--color-primary').trim();
+        const primaryLightColor = computedStyle.getPropertyValue('--color-primary-light').trim();
+        const accentColor = computedStyle.getPropertyValue('--color-accent').trim();
+        
+        console.log('Theme colors for modal:', {
+            textColor,
+            textSecondaryColor,
+            bgColor,
+            surfaceColor,
+            primaryColor,
+            primaryLightColor,
+            accentColor
+        });
         
         // Create a modal container
         const modalContainer = document.createElement('div');
+        modalContainer.className = 'frame-edit-modal'; // Add class for easy selection
         modalContainer.style.position = 'fixed';
         modalContainer.style.top = '50%';
         modalContainer.style.left = '50%';
         modalContainer.style.transform = 'translate(-50%, -50%)';
         modalContainer.style.zIndex = '9999';
-        modalContainer.style.background = bgColor;
+        modalContainer.style.background = surfaceColor;
         modalContainer.style.padding = '20px';
-        modalContainer.style.borderRadius = '10px';
-        modalContainer.style.border = `2px solid ${accentColor}`;
+        modalContainer.style.border = `2px solid ${primaryColor}`;
         modalContainer.style.boxShadow = '0 0 30px rgba(0, 0, 0, 0.8)';
+        
+        // Create a header with label and close button
+        const headerContainer = document.createElement('div');
+        headerContainer.style.display = 'flex';
+        headerContainer.style.justifyContent = 'space-between';
+        headerContainer.style.alignItems = 'center';
+        headerContainer.style.marginBottom = '15px';
         
         // Create a label
         const label = document.createElement('div');
-        label.textContent = 'Edit Total Frames:';
+        label.textContent = 'Edit Total Frames';
         label.style.color = textColor;
-        label.style.marginBottom = '10px';
         label.style.fontFamily = "'Space Mono', monospace";
-        label.style.fontSize = '1.5rem';
-        label.style.textAlign = 'center';
+        label.style.fontSize = '1.2rem';
+        
+        // Create reset button (refresh icon)
+        const resetButton = document.createElement('button');
+        resetButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
+        resetButton.style.background = 'transparent';
+        resetButton.style.color = accentColor;
+        resetButton.style.border = 'none';
+        resetButton.style.cursor = 'pointer';
+        resetButton.style.display = 'flex';
+        resetButton.style.alignItems = 'center';
+        resetButton.style.justifyContent = 'center';
+        resetButton.style.padding = '5px';
+        resetButton.title = 'Reset Frame Count';
+        
+        // Create form element to handle Enter key properly
+        const form = document.createElement('form');
+        form.style.margin = '0';
+        form.style.padding = '0';
+        form.style.width = '100%';
         
         // Create input
         const input = document.createElement('input');
@@ -1287,94 +1415,156 @@ function initFrameCounter() {
         input.value = total || 0;
         input.style.background = bgColor;
         input.style.color = textColor;
-        input.style.border = `2px solid ${accentColor}`;
-        input.style.borderRadius = '4px';
+        input.style.border = `1px solid ${primaryColor}`;
         input.style.padding = '0.5rem';
-        input.style.fontSize = '2rem';
+        input.style.fontSize = '1.5rem';
         input.style.fontWeight = 'bold';
-        input.style.width = '200px';
+        input.style.width = '100%';
         input.style.textAlign = 'center';
         input.style.fontFamily = "'Space Mono', monospace";
-        input.style.display = 'block';
-        input.style.margin = '0 auto';
+        input.style.marginBottom = '15px';
+        input.style.boxSizing = 'border-box';
         
         // Create buttons
         const buttonContainer = document.createElement('div');
         buttonContainer.style.display = 'flex';
-        buttonContainer.style.justifyContent = 'center';
-        buttonContainer.style.marginTop = '15px';
+        buttonContainer.style.justifyContent = 'space-between';
         buttonContainer.style.gap = '10px';
         
         const saveButton = document.createElement('button');
-        saveButton.textContent = 'Save';
+        saveButton.type = 'submit'; // Make it a submit button for the form
+        saveButton.textContent = 'SAVE';
         saveButton.style.background = accentColor;
-        saveButton.style.color = '#000000';
+        saveButton.style.color = '#000000'; // Dark text on light accent color
         saveButton.style.border = 'none';
-        saveButton.style.borderRadius = '4px';
         saveButton.style.padding = '8px 15px';
         saveButton.style.cursor = 'pointer';
         saveButton.style.fontFamily = "'Space Mono', monospace";
         saveButton.style.fontWeight = 'bold';
+        saveButton.style.flex = '1';
         
         const cancelButton = document.createElement('button');
-        cancelButton.textContent = 'Cancel';
+        cancelButton.type = 'button'; // Explicitly set as button type
+        cancelButton.textContent = 'CANCEL';
         cancelButton.style.background = 'rgba(255, 255, 255, 0.1)';
         cancelButton.style.color = textColor;
         cancelButton.style.border = 'none';
-        cancelButton.style.borderRadius = '4px';
         cancelButton.style.padding = '8px 15px';
         cancelButton.style.cursor = 'pointer';
         cancelButton.style.fontFamily = "'Space Mono', monospace";
+        cancelButton.style.flex = '1';
         
-        // Function to close the modal
-        const closeModal = () => {
+        // Function to remove the modal and overlay
+        const removeModal = () => {
+            // Remove all event listeners
+            document.removeEventListener('keydown', handleKeyDown);
+            
+            // Disconnect the observer
+            if (observer) {
+                observer.disconnect();
+            }
+            
+            // Remove the elements
+            if (document.body.contains(overlay)) {
+                document.body.removeChild(overlay);
+            }
             if (document.body.contains(modalContainer)) {
                 document.body.removeChild(modalContainer);
             }
         };
         
-        // Add event listeners
-        saveButton.addEventListener('click', () => {
+        // Function to save the frame count
+        const saveFrameCount = (e) => {
+            if (e) {
+                e.preventDefault(); // Prevent form submission
+            }
+            
             const newTotal = parseInt(input.value, 10) || total;
+            
+            // Update UI
             frameCounter.textContent = `${current}/${newTotal}`;
-            setTotalFramesViaWebSocket(newTotal);
-            closeModal();
+            
+            // Remove modal
+            removeModal();
+            
+            // Send WebSocket update
+            setTimeout(() => {
+                setTotalFramesViaWebSocket(newTotal);
+            }, 100);
+        };
+        
+        // Handle form submission (Enter key)
+        form.addEventListener('submit', saveFrameCount);
+        
+        // Handle save button click
+        saveButton.addEventListener('click', saveFrameCount);
+        
+        // Handle cancel button click
+        cancelButton.addEventListener('click', removeModal);
+        
+        // Handle reset button click
+        resetButton.addEventListener('click', () => {
+            removeModal();
+            setTimeout(() => {
+                resetFrameCount();
+            }, 100);
         });
         
-        cancelButton.addEventListener('click', () => {
-            closeModal();
-        });
-        
-        input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                saveButton.click();
-            } else if (e.key === 'Escape') {
-                cancelButton.click();
+        // Handle click on overlay (outside the modal)
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) {
+                removeModal();
             }
         });
         
-        // Close modal when clicking outside
-        modalContainer.addEventListener('click', (e) => {
-            if (e.target === modalContainer) {
-                closeModal();
+        // Handle ESC key
+        const handleKeyDown = (e) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                removeModal();
             }
-        });
+        };
         
-        // Assemble the container
+        document.addEventListener('keydown', handleKeyDown);
+        
+        // Assemble the form
+        form.appendChild(input);
+        form.appendChild(buttonContainer);
         buttonContainer.appendChild(saveButton);
         buttonContainer.appendChild(cancelButton);
-        modalContainer.appendChild(label);
-        modalContainer.appendChild(input);
-        modalContainer.appendChild(buttonContainer);
         
-        // Add to body
+        // Assemble the container
+        headerContainer.appendChild(label);
+        headerContainer.appendChild(resetButton);
+        
+        modalContainer.appendChild(headerContainer);
+        modalContainer.appendChild(form);
+        
+        // Add overlay first, then modal
+        document.body.appendChild(overlay);
         document.body.appendChild(modalContainer);
         
-        // Focus the input
+        // Focus the input after the modal is added to the DOM
         setTimeout(() => {
             input.focus();
             input.select();
-        }, 0);
+        }, 10);
+        
+        // Clean up event listener when modal is removed
+        const observer = new MutationObserver((mutations) => {
+            mutations.forEach((mutation) => {
+                if (mutation.removedNodes) {
+                    mutation.removedNodes.forEach((node) => {
+                        if (node === modalContainer || node === overlay) {
+                            document.removeEventListener('keydown', handleKeyDown);
+                            observer.disconnect();
+                        }
+                    });
+                }
+            });
+        });
+        
+        observer.observe(document.body, { childList: true });
     });
 }
 
@@ -1416,6 +1606,7 @@ function initScrollBehavior() {
     const panelContainer = document.querySelector('.panel-container');
     const panel = document.querySelector('.panel');
     const toggleButton = document.getElementById('panel-toggle');
+    const settingsToggle = document.getElementById('settings-toggle');
     
     if (!panel || !toggleButton || !panelContainer) {
         console.error('Panel, container, or toggle button not found');
@@ -1425,11 +1616,13 @@ function initScrollBehavior() {
     function showPanel() {
         panelContainer.classList.remove('hidden');
         toggleButton.textContent = 'Hide';
+        // The CSS will automatically adjust the settings toggle position
     }
     
     function hidePanel() {
         panelContainer.classList.add('hidden');
         toggleButton.textContent = 'Info';
+        // The CSS will automatically adjust the settings toggle position
     }
     
     toggleButton.addEventListener('click', () => {
@@ -1440,7 +1633,7 @@ function initScrollBehavior() {
         }
     });
     
-    // Initialize panel as hidden
+    // Initialize panel state (hidden by default)
     hidePanel();
 }
 
@@ -1512,15 +1705,17 @@ function animateProgressFilling(oldCompletionRatio, newCompletionRatio, duration
         return;
     }
     
-    // Log animation start (commented out to reduce noise)
-    // console.log('ANIMATION_DEBUG - Starting animation:', {
-    //     oldCompletionRatio: oldCompletionRatio.toFixed(3),
-    //     newCompletionRatio: newCompletionRatio.toFixed(3),
-    //     duration,
-    //     framesChanged,
-    //     manualTotalFrames: window.manualTotalFrames,
-    //     timestamp: new Date().toISOString()
-    // });
+    // If we're already animating, cancel the current animation
+    if (isAnimatingProgress) {
+        // Cancel any pending animation frames
+        if (pendingAnimationRequest) {
+            cancelAnimationFrame(pendingAnimationRequest);
+            pendingAnimationRequest = null;
+        }
+    }
+    
+    // Mark that we're now animating
+    isAnimatingProgress = true;
     
     // Create easing functions library
     const easing = {
@@ -1572,13 +1767,6 @@ function animateProgressFilling(oldCompletionRatio, newCompletionRatio, duration
     
     // Only emit particles if frames actually changed, not just on ratio changes
     const shouldEmitParticles = framesChanged;
-    
-    // console.log('ANIMATION_DEBUG - Change analysis:', {
-    //     change: change.toFixed(3),
-    //     framesChanged,
-    //     shouldEmitParticles,
-    //     easingFunction: change > 0.3 ? 'sineEaseInOut' : (change > 0.1 ? 'cubicEaseInOut' : 'expoEaseOut')
-    // });
     
     // Flag to ensure particles are only emitted once
     let particlesEmitted = false;
@@ -1672,7 +1860,7 @@ function animateProgressFilling(oldCompletionRatio, newCompletionRatio, duration
                     
                     // Continue animation if phase 2 is not complete
                     if (progress < 1) {
-                        requestAnimationFrame(animatePhase2);
+                        pendingAnimationRequest = requestAnimationFrame(animatePhase2);
                     } else {
                         // Animation complete - trigger particle effect only if frames actually changed
                         // and only if particles haven't been emitted yet
@@ -1701,6 +1889,10 @@ function animateProgressFilling(oldCompletionRatio, newCompletionRatio, duration
                         
                         // Restore the actual completed frames count
                         completedFrames = targetCompletedFrames;
+                        
+                        // Animation complete
+                        isAnimatingProgress = false;
+                        pendingAnimationRequest = null;
                     }
                 };
                 
@@ -1715,11 +1907,6 @@ function animateProgressFilling(oldCompletionRatio, newCompletionRatio, duration
         // Going forwards - simple animation from old ratio to new ratio
         animationStartRatio = oldCompletionRatio;
         animationEndRatio = newCompletionRatio;
-        
-        // console.log('ANIMATION_DEBUG - Forward animation path:', {
-        //     path: `${(oldCompletionRatio * 100).toFixed(1)}% → ${(newCompletionRatio * 100).toFixed(1)}%`,
-        //     duration
-        // });
         
         // Animation function for forward motion
         const animate = () => {
@@ -1744,7 +1931,7 @@ function animateProgressFilling(oldCompletionRatio, newCompletionRatio, duration
             
             // Continue animation if not complete
             if (progress < 1) {
-                requestAnimationFrame(animate);
+                pendingAnimationRequest = requestAnimationFrame(animate);
             } else {
                 // Ensure final state is shown with the correct target frame count
                 updateVisualization(targetCompletedFrames, effectiveTotalFrames);
@@ -1773,6 +1960,10 @@ function animateProgressFilling(oldCompletionRatio, newCompletionRatio, duration
                         finalFrameCount: targetCompletedFrames
                     });
                 }
+                
+                // Animation complete
+                isAnimatingProgress = false;
+                pendingAnimationRequest = null;
             }
         };
         
@@ -2045,22 +2236,19 @@ function connectWebSocket() {
                 // Update progress bar
                 updateProgressBar(data.percentage);
                 
-                // Update visualization
-                updateVisualization(data.completedFrames, data.totalFrames);
+                // Update visualization with debounce
+                setTimeout(() => {
+                    updateVisualization(data.completedFrames, data.totalFrames);
+                }, 50);
             }
+            
+            // ... existing code ...
         } catch (error) {
-            console.error('Error processing WebSocket message:', error);
+            console.error('Error parsing WebSocket message:', error);
         }
     };
     
-    socket.onclose = function() {
-        console.log('WebSocket connection closed. Reconnecting in 5 seconds...');
-        setTimeout(connectWebSocket, 5000);
-    };
-    
-    socket.onerror = function(error) {
-        console.error('WebSocket error:', error);
-    };
+    // ... existing code ...
 }
 
 // Initialize the application
@@ -2171,5 +2359,45 @@ function requestCurrentState() {
         }));
     } else {
         console.warn('Cannot request state: WebSocket not connected');
+    }
+}
+
+// Function to reset frame count via WebSocket
+function resetFrameCount() {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+            type: 'resetFrames'
+        }));
+        console.log('Sent reset frames request to server');
+        return true;
+    } else {
+        console.error('WebSocket not connected, cannot reset frames');
+        // Try to use the HTTP API as fallback
+        fetch('/api/reset-frames', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                console.log('Reset frames via HTTP API:', data);
+                // Update UI immediately
+                const frameCounterEl = document.getElementById('frame-counter');
+                if (frameCounterEl) {
+                    const totalFrames = window.manualTotalFrames || 120;
+                    frameCounterEl.textContent = `${data.completedFrames}/${totalFrames}`;
+                }
+                // Update visualization
+                updateVisualization(data.completedFrames, window.manualTotalFrames || 120);
+            } else {
+                console.error('Failed to reset frames:', data.error);
+            }
+        })
+        .catch(error => {
+            console.error('Error resetting frames:', error);
+        });
+        return false;
     }
 }
